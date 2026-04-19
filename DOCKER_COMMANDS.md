@@ -1,11 +1,9 @@
-# Docker Commands for Traffic Monitoring Assignment (Fixed)
+# Docker Commands for Traffic Monitoring Assignment (Working Guide)
 
-> Note: Docker Desktop does NOT support OVS kernel properly.
-> We include both:
-> - OVS attempt (may fail)
-> - Working fallback (lxbr)
+> **Important:** Docker Desktop (Mac/Windows) does not include the OVS Linux kernel module (`modprobe: FATAL`).
+> To completely fix this, we run Open vSwitch entirely in userspace using `datapath=user`.
 
-## 1) Start container (host)
+## 1) Start the Container (Host Machine)
 
 ```bash
 docker run -it --privileged --name cn-sdn \
@@ -15,15 +13,15 @@ docker run -it --privileged --name cn-sdn \
   bash
 ```
 
-```
+If you need to open additional terminals inside the running container, use:
+```bash
 docker exec -it cn-sdn bash
 ```
 
-## 2) Install dependencies
+## 2) Install OS Dependencies
 
 ```bash
-apt update
-apt upgrade -y
+apt update && apt upgrade -y
 
 apt install -y \
   python3 python3-venv python3-pip \
@@ -31,7 +29,9 @@ apt install -y \
   iproute2 iputils-ping bridge-utils
 ```
 
-## 3) Setup Python + Ryu (WORKING METHOD)
+## 3) Setup Python Environment & Ryu
+
+Modern Python environments block global package installs. We use a virtual environment.
 
 ```bash
 python3 -m venv /workspace/ryu-venv
@@ -39,150 +39,77 @@ source /workspace/ryu-venv/bin/activate
 
 pip install --upgrade pip
 pip install "setuptools<60" wheel
-```
 
-### Install Ryu (manual fix)
-
-```bash
+# Install Ryu manually
 cd /workspace
 git clone https://github.com/faucetsdn/ryu.git
 cd ryu
 python setup.py install
+
+# Install Ryu dependencies
+pip install netaddr eventlet==0.33.3 dnspython>=2.2.0 oslo.config routes webob msgpack ovs six tinyrpc==1.0.4 packaging==20.9
 ```
 
-### Install required dependencies
+## 4) Start the Open vSwitch Service
 
-```bash
-pip install \
-  netaddr \
-  eventlet==0.33.3 \
-  dnspython>=2.2.0 \
-  oslo.config \
-  routes \
-  webob \
-  msgpack \
-  ovs \
-  six \
-  tinyrpc==1.0.4 \
-  packaging==20.9
-```
-
-## 4) Verify Ryu
-
-```bash
-ryu-manager --version
-```
-
-Expected:
-
-```text
-ryu-manager 4.34
-```
-
-## 5) Try Open vSwitch (may fail in Docker)
+Before running Mininet, you must start the OVS service in the background:
 
 ```bash
 service openvswitch-switch start
 ovs-vsctl show
 ```
 
-```
-mn --switch=lxbr --controller=remote
-```
+---
 
-## 6) Run controller (Terminal A)
+## 5) Run the SDN Controller (Terminal 1)
+
+Keep this terminal open so the controller stays active.
 
 ```bash
-mkdir -p reports
-
 source /workspace/ryu-venv/bin/activate
-ryu-manager controller/traffic_monitor.py
+cd /workspace/controller
+ryu-manager traffic_monitor.py --ofp-tcp-listen-port 6653
 ```
 
-Optional polling:
+---
 
-```bash
-POLL_INTERVAL=5 ryu-manager controller/traffic_monitor.py
-```
+## 6) Run Mininet with Userspace OVS (Terminal 2)
 
-## 7) Run Mininet (Terminal B)
-
-Try OVS (required for full SDN):
-
-```bash
-mn --topo single,3 --mac \
-   --switch ovs,protocols=OpenFlow13 \
-   --controller remote,ip=127.0.0.1,port=6653
-```
-
-If OVS fails, use fallback (works reliably):
-
-```bash
-mn --topo single,3 --mac \
-   --switch lxbr \
-   --controller remote,ip=127.0.0.1,port=6653
-```
-
-## 8) Generate traffic (Mininet CLI)
-
-```bash
-nodes
-net
-
-pingall
-
-h1 ping -c 10 h2
-iperf h1 h2
-
-h1 ping -c 20 h3
-```
-
-## 9) Validate flows (ONLY works if OVS works)
-
-```bash
-sh ovs-ofctl -O OpenFlow13 dump-flows s1
-```
-
-If using lxbr, this will not work (expected).
-
-## 10) View report
-
-```bash
-exit
-cd /workspace
-cat reports/traffic_report_latest.md
-```
-
-## 11) Cleanup
+In a second terminal (attached via `docker exec`), start Mininet. 
+**Critically**, we add `datapath=user` to bypass the missing kernel module, and point to the custom topology.
 
 ```bash
 mn -c
-pkill -f ryu-manager
+
+mn --custom /workspace/controller/firewall_topo.py \
+   --topo firewalltopo \
+   --switch ovs,protocols=OpenFlow13,datapath=user \
+   --controller remote,ip=127.0.0.1,port=6653 \
+   --mac
 ```
 
-## Important Notes
+---
 
-### What works in Docker
+## 7) Generate Traffic & View Report (Inside Mininet CLI)
 
-| Feature | Status |
-| --- | --- |
-| Mininet topology | ✅ |
-| Ryu controller | ✅ |
-| Traffic generation | ✅ |
-| Logging/monitoring | ✅ |
+Wait for Mininet to start processing (you should see nodes `c0 h1 h2 h3 h4 s1`). Then generate traffic:
 
-### What is limited
+```text
+mininet> pingall
+mininet> h1 iperf -c h2
+```
 
-| Feature | Status |
-| --- | --- |
-| OVS kernel datapath | ❌ |
-| True OpenFlow switching | ❌ |
-| Flow table inspection | ⚠️ partial |
+Because your Ryu controller is running and pushing flow statistics every 10 seconds, you can immediately view the generated markdown report directly from the Mininet shell:
 
-## Recommendation
+```text
+mininet> sh cat /workspace/controller/reports/traffic_report_latest.md
+```
 
-For full SDN behavior (best marks):
-- Use Ubuntu VM instead of Docker.
+## 8) Cleanup
 
-For demo + submission:
-- Docker setup is sufficient if limitations are explained clearly.
+When you are done:
+```bash
+mininet> exit
+mn -c
+pkill -f ryu-manager
+```
