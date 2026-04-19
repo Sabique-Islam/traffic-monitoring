@@ -1,16 +1,26 @@
-"""Flow statistics aggregation and report generation."""
+"""Flow statistics aggregation and report generation.
+
+This module converts raw OpenFlow stats replies into:
+- readable controller logs,
+- per-interval deltas,
+- and a simple markdown report for submission/demo.
+"""
 
 import os
 from datetime import datetime
 
 
 class StatsReporter:
+    """Builds flow summaries and writes human-readable reports."""
+
     def __init__(self, logger, report_path):
         self.logger = logger
         self.report_path = report_path
+        # Keeps previous counters per flow key so we can compute deltas.
         self.flow_baseline = {}
 
     def _flow_key(self, dpid, stat):
+        """Create a stable identity for a flow across polling cycles."""
         in_port = stat.match.get("in_port", "-")
         eth_src = stat.match.get("eth_src", "-")
         eth_dst = stat.match.get("eth_dst", "-")
@@ -22,6 +32,8 @@ class StatsReporter:
         return (dpid, in_port, eth_src, eth_dst, out_port)
 
     def handle_flow_stats_reply(self, dpid, body):
+        """Parse flow stats reply, log totals/deltas, and refresh report."""
+        # Focus on learned forwarding flows, not table-miss/default rules.
         learned_flows = [
             stat
             for stat in body
@@ -45,6 +57,7 @@ class StatsReporter:
             key = self._flow_key(dpid, stat)
             prev_packets, prev_bytes = self.flow_baseline.get(key, (0, 0))
 
+            # Delta counters show traffic growth since last poll.
             delta_packets = stat.packet_count - prev_packets
             delta_bytes = stat.byte_count - prev_bytes
             self.flow_baseline[key] = (stat.packet_count, stat.byte_count)
@@ -86,6 +99,8 @@ class StatsReporter:
         self._write_report(dpid, flow_rows, total_packets, total_bytes)
 
     def _write_report(self, dpid, flow_rows, total_packets, total_bytes):
+        """Write latest traffic snapshot into markdown report file."""
+        # Ensure report directory exists before writing.
         os.makedirs(os.path.dirname(self.report_path) or ".", exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -100,6 +115,7 @@ class StatsReporter:
             f.write(f"Total bytes: {total_bytes}\n\n")
 
             if top_flow:
+                # Highlight the highest-byte flow for quick analysis.
                 f.write("## Top Flow by Bytes\n\n")
                 f.write(
                     "- "
